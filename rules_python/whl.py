@@ -19,6 +19,8 @@ import os
 import pkg_resources
 import re
 import zipfile
+from wheel.metadata import EXTRA_RE
+from wheel.pkginfo import read_pkg_info_bytes
 
 
 class ZipFilePermissions(zipfile.ZipFile):
@@ -35,6 +37,19 @@ class ZipFilePermissions(zipfile.ZipFile):
         attr = member.external_attr >> 16
         os.chmod(ret_val, attr)
         return ret_val
+
+    # Overriding behaviour for python3.7 to keep permissions
+    def extractall(self, path=None, members=None, pwd=None):
+        """Extract all members from the archive to the current working
+           directory. `path' specifies a different directory to extract to.
+           `members' is optional and must be a subset of the list returned
+           by namelist().
+        """
+        if members is None:
+            members = self.namelist()
+
+        for zipinfo in members:
+            self.extract(zipinfo, path, pwd)
 
 class Wheel(object):
 
@@ -79,9 +94,10 @@ class Wheel(object):
           return json.loads(f.read().decode("utf-8"))
       except KeyError:
           pass
-      # fall back to METADATA file (https://www.python.org/dev/peps/pep-0427/)
+      # fall back to METADATA file
       with whl.open(self._dist_info() + '/METADATA') as f:
-        return self._parse_metadata(f.read().decode("utf-8"))
+        # TODO in future convert fully to METADATA
+        return self._parse_metadata(f.read())
 
   def name(self):
     return self.metadata().get('name')
@@ -122,10 +138,67 @@ class Wheel(object):
 
   # _parse_metadata parses METADATA files according to https://www.python.org/dev/peps/pep-0314/
   def _parse_metadata(self, content):
-    # TODO: handle fields other than just name
-    name_pattern = re.compile('Name: (.*)')
-    return { 'name': name_pattern.search(content).group(1) }
 
+    def _parse_requires_dist(dists):
+        ret = []
+        envs = {}
+        ver_re = re.compile("^(?P<package>.*?)(;\s*(?P<condition>.*?)(extra == '(?P<extra>.*?)')?)?$")
+
+        # Parse Requires-Dist to multilevel dict
+        for dist in dists:
+            match = ver_re.match(dist)
+            if match.group('condition'):
+                env = match.group('condition')
+            else:
+                env = 'default'
+
+            if match.group('extra'):
+                extra = match.group('extra')
+            else:
+                extra = 'default'
+
+            if env not in envs:
+                envs[env] = {}
+
+            if extra not in envs[env]:
+                envs[env][extra] = []
+
+            envs[env][extra].append(match.group('package'))
+
+        # Convert to old metadata json format
+        for env in envs:
+            for extra, deps in envs[env].items():
+                req = {
+                    'requires': deps
+                }
+                # Set environment
+                if env != 'default':
+                    req['environment'] = env
+
+                # Set extra
+                if extra != 'default':
+                    req['extra'] = extra
+
+                ret.append(req)
+
+        return ret
+
+    mapping = {
+        'Name': 'name',
+        'Version': 'version',
+        'Provides-Extra': 'extra',
+    }
+    metadata = {}
+
+    dist_info = read_pkg_info_bytes(content)
+    for header in ['Name', 'Version', 'Requires-Dist', 'Provides-Extra']:
+        values = dist_info.get_all(header)
+        if header == 'Requires-Dist' and values:
+            metadata['run_requires'] = _parse_requires_dist(values)
+        elif values:
+            metadata[mapping[header]] = values if len(values) > 1 else values.pop()
+
+    return metadata
 
 parser = argparse.ArgumentParser(
     description='Unpack a WHL file as a py_library.')
