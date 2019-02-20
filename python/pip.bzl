@@ -40,7 +40,9 @@ def _pip_system_import_impl(repository_ctx):
 
 def _pip3_import_impl(repository_ctx):
   """Python 3 implementation."""
-  _pip_import_impl(repository_ctx, "python3")
+  python_bin = repository_ctx.os.environ.get("PYTHON3_BIN_PATH", "python3")
+  _pip_import_impl(repository_ctx, python_bin)
+
 
 pip_import = repository_rule(
     attrs = {
